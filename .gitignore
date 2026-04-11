@@ -1,0 +1,14 @@
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+
+# Local planning notes
+plan.txt
+
+# Large raw datasets stay local by default.
+datasets/raw/*
+
+# Local model artifacts
+artifacts/
