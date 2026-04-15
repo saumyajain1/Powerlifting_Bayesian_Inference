@@ -6,6 +6,7 @@
 
 # Local planning notes
 plan.txt
+discussion.txt
 
 # Large raw datasets stay local by default.
 datasets/raw/*
