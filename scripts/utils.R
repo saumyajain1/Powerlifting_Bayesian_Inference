@@ -64,6 +64,7 @@ quantile_bin <- function(x, probs = seq(0, 1, by = 0.1)) {
 }
 
 baseline_parameter_vars <- c("alpha", "beta_male", "beta_bw", "beta_age", "sigma")
+main_parameter_vars <- c("alpha", "beta_male", "beta_bw", "beta_bw2", "beta_age", "beta_age2", "sigma", "nu")
 
 baseline_prior_data <- function() {
   list(
@@ -79,7 +80,7 @@ baseline_prior_data <- function() {
 baseline_ppc_subset <- function(model_df, n = 300, seed = 405) {
   set.seed(seed)
   idx <- sort(sample(seq_len(nrow(model_df)), n))
-  out <- model_df[idx, c("Sex", "Age", "BodyweightKg", "TotalKg", "male", "bw_z", "age_z")]
+  out <- model_df[idx, c("Sex", "Age", "BodyweightKg", "TotalKg", "male", "bw_z", "bw_z2", "age_z", "age_z2")]
   out$ppc_id <- seq_len(nrow(out))
   out
 }
@@ -131,4 +132,40 @@ fit_parameter_summary <- function(fit, variables, method) {
   out <- align_summary_columns(as.data.frame(fit$summary(variables = variables)))
   out$method <- method
   out
+}
+
+main_prior_data <- function() {
+  list(
+    alpha_mean = 483.2,
+    alpha_sd = 117.7,
+    beta_male_sd = 94.2,
+    beta_bw_sd = 54.9,
+    beta_bw2_sd = 15.7,
+    beta_age_sd = 31.4,
+    beta_age2_sd = 15.7,
+    sigma_rate = 0.0142,
+    nu_offset = 4,
+    nu_rate = 0.1667
+  )
+}
+
+main_stan_data <- function(main_data, prediction_grid, ppc_df) {
+  c(
+    main_data,
+    list(
+      N_pred = nrow(prediction_grid),
+      male_pred = prediction_grid$male,
+      bw_z_pred = prediction_grid$bw_z,
+      bw_z2_pred = prediction_grid$bw_z2,
+      age_z_pred = prediction_grid$age_z,
+      age_z2_pred = prediction_grid$age_z2,
+      N_ppc = nrow(ppc_df),
+      male_ppc = ppc_df$male,
+      bw_z_ppc = ppc_df$bw_z,
+      bw_z2_ppc = ppc_df$bw_z2,
+      age_z_ppc = ppc_df$age_z,
+      age_z2_ppc = ppc_df$age_z2
+    ),
+    main_prior_data()
+  )
 }
