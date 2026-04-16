@@ -57,66 +57,24 @@ exact_baseline_draws <- function(data_df, n_draws = 12000) {
   out$sigma <- sigma_draws
   out
 }
-
-draw_summary <- function(draw_df, method) {
-  out <- data.frame(
-    variable = names(draw_df),
-    mean = vapply(draw_df, mean, numeric(1)),
-    median = vapply(draw_df, median, numeric(1)),
-    sd = vapply(draw_df, sd, numeric(1)),
-    q5 = vapply(draw_df, quantile, numeric(1), probs = 0.05),
-    q95 = vapply(draw_df, quantile, numeric(1), probs = 0.95),
-    row.names = NULL
-  )
-
-  out <- align_summary_columns(out)
-  out$method <- method
-  out
-}
-
-ppc_density_df <- function(draw_matrix, observed, method, n_reps = 25) {
-  keep <- sample(seq_len(nrow(draw_matrix)), n_reps)
-
-  rbind(
-    bind_rows(lapply(seq_along(keep), function(i) {
-      dens <- density(draw_matrix[keep[i], ])
-      data.frame(x = dens$x, y = dens$y, method = method, source = "Posterior predictive", rep = i)
-    })),
-    {
-      dens <- density(observed)
-      data.frame(x = dens$x, y = dens$y, method = method, source = "Observed data", rep = 0)
-    }
-  )
-}
-
-ppc_coverage_df <- function(draw_matrix, observed, method, levels = seq(0.1, 0.95, by = 0.05)) {
-  bind_rows(lapply(levels, function(level) {
-    alpha <- (1 - level) / 2
-    lower <- apply(draw_matrix, 2, quantile, probs = alpha)
-    upper <- apply(draw_matrix, 2, quantile, probs = 1 - alpha)
-
-    data.frame(method = method, nominal = level, actual = mean(observed >= lower & observed <= upper))
-  }))
-}
-
-hmc_fit <- readRDS(file.path(artifacts_dir, "baseline_hmc_fit.rds"))
-meanfield_fit <- readRDS(file.path(artifacts_dir, "baseline_vi_meanfield_fit.rds"))
-fullrank_fit <- readRDS(file.path(artifacts_dir, "baseline_vi_fullrank_fit.rds"))
+fits <- list(
+  "HMC" = readRDS(file.path(artifacts_dir, "baseline_hmc_fit.rds")),
+  "Mean-field VI" = readRDS(file.path(artifacts_dir, "baseline_vi_meanfield_fit.rds")),
+  "Full-rank VI" = readRDS(file.path(artifacts_dir, "baseline_vi_fullrank_fit.rds"))
+)
 model_df <- readRDS(file.path(tables_dir, "model_data.rds"))
 prediction_summary <- read.csv(file.path(tables_dir, "baseline_prediction_summary.csv"), stringsAsFactors = FALSE)
 ppc_df <- baseline_ppc_subset(model_df)
 
 set.seed(405)
-parameter_summary <- rbind(
+parameter_summary <- bind_rows(
   draw_summary(exact_baseline_draws(model_df[, c("TotalKg", "male", "bw_z", "age_z")]), "Exact"),
-  fit_parameter_summary(hmc_fit, baseline_parameter_vars, "HMC"),
-  fit_parameter_summary(meanfield_fit, baseline_parameter_vars, "Mean-field VI"),
-  fit_parameter_summary(fullrank_fit, baseline_parameter_vars, "Full-rank VI")
+  fit_list_parameter_summary(fits, baseline_parameter_vars)
 )
 
 write.csv(parameter_summary, file.path(tables_dir, "baseline_parameter_summary.csv"), row.names = FALSE)
 
-trace_df <- as.data.frame(as_draws_df(hmc_fit$draws(variables = baseline_parameter_vars))) |>
+trace_df <- as.data.frame(as_draws_df(fits$HMC$draws(variables = baseline_parameter_vars))) |>
   select(all_of(baseline_parameter_vars), .chain, .iteration) |>
   pivot_longer(cols = all_of(baseline_parameter_vars), names_to = "parameter", values_to = "value")
 
@@ -155,21 +113,20 @@ save_plot(
   5.2
 )
 
-hmc_y_ppc <- as_draws_matrix(hmc_fit$draws(variables = "y_ppc"))
-meanfield_y_ppc <- as_draws_matrix(meanfield_fit$draws(variables = "y_ppc"))
-fullrank_y_ppc <- as_draws_matrix(fullrank_fit$draws(variables = "y_ppc"))
+ppc_draws <- lapply(fits, function(fit) {
+  as_draws_matrix(fit$draws(variables = "y_ppc"))
+})
 
+set.seed(405)
 save_plot(
   ggplot(
-    bind_rows(
-      ppc_density_df(hmc_y_ppc, ppc_df$TotalKg, "HMC"),
-      ppc_density_df(meanfield_y_ppc, ppc_df$TotalKg, "Mean-field VI"),
-      ppc_density_df(fullrank_y_ppc, ppc_df$TotalKg, "Full-rank VI")
-    )
+    bind_rows(lapply(names(ppc_draws), function(method) {
+      ppc_density_df(ppc_draws[[method]], ppc_df$TotalKg, method)
+    }))
   ) +
     geom_line(
       data = function(x) subset(x, source == "Posterior predictive"),
-      aes(x, y, group = interaction(method, rep)),
+      aes(x, y, group = interaction(label, rep)),
       color = "#94a3b8",
       alpha = 0.35,
       linewidth = 0.4
@@ -180,7 +137,7 @@ save_plot(
       color = "#111827",
       linewidth = 1
     ) +
-    facet_wrap(~ method, ncol = 1) +
+    facet_wrap(~ label, ncol = 1) +
     labs(
       title = "Baseline Posterior Predictive Check",
       subtitle = "Observed subset density against posterior predictive replicated densities",
@@ -193,14 +150,12 @@ save_plot(
   7
 )
 
-coverage_df <- bind_rows(
-  ppc_coverage_df(hmc_y_ppc, ppc_df$TotalKg, "HMC"),
-  ppc_coverage_df(meanfield_y_ppc, ppc_df$TotalKg, "Mean-field VI"),
-  ppc_coverage_df(fullrank_y_ppc, ppc_df$TotalKg, "Full-rank VI")
-)
+coverage_df <- bind_rows(lapply(names(ppc_draws), function(method) {
+  ppc_coverage_df(ppc_draws[[method]], ppc_df$TotalKg, method)
+}))
 
 save_plot(
-  ggplot(coverage_df, aes(nominal, actual, color = method)) +
+  ggplot(coverage_df, aes(nominal, actual, color = label)) +
     geom_abline(slope = 1, intercept = 0, color = "#9ca3af", linetype = "dashed") +
     geom_line(linewidth = 0.9) +
     geom_point(size = 1.8) +
@@ -242,6 +197,7 @@ save_plot(
   7
 )
 
+set.seed(406)
 recovery_df <- model_df[sample(seq_len(nrow(model_df)), 1500), c("male", "bw_z", "age_z")]
 recovery_data <- c(
   list(
@@ -264,24 +220,18 @@ recovery_data <- c(
 
 model <- cmdstan_model(stan_file, compile = FALSE)
 model$compile(dir = file.path(artifacts_dir, "cmdstan"), quiet = TRUE)
-
-if (file.exists(recovery_fit_path)) {
-  recovery_fit <- readRDS(recovery_fit_path)
-} else {
-  recovery_fit <- model$sample(
-    data = recovery_data,
-    seed = 406,
-    chains = 4,
-    parallel_chains = min(4, parallel::detectCores()),
-    iter_warmup = 250,
-    iter_sampling = 250,
-    adapt_delta = 0.9,
-    refresh = 100,
-    output_dir = recovery_dir,
-    output_basename = "baseline_recovery_hmc"
-  )
-  saveRDS(recovery_fit, recovery_fit_path)
-}
+recovery_fit <- load_or_sample_fit(
+  model,
+  recovery_data,
+  recovery_fit_path,
+  recovery_dir,
+  "baseline_recovery_hmc",
+  seed = 406,
+  adapt_delta = 0.9,
+  iter_warmup = 250,
+  iter_sampling = 250,
+  refresh = 100
+)
 
 recovery_summary <- as.data.frame(recovery_fit$summary(variables = baseline_parameter_vars)) |>
   select(variable, mean, q5, q95) |>

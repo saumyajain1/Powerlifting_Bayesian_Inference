@@ -11,49 +11,17 @@ artifacts_dir <- "artifacts/main"
 
 ensure_dir(figures_dir)
 
-ppc_density_df <- function(draw_matrix, observed, method, n_reps = 25) {
-  keep <- sample(seq_len(nrow(draw_matrix)), n_reps)
-
-  rbind(
-    bind_rows(lapply(seq_along(keep), function(i) {
-      dens <- density(draw_matrix[keep[i], ])
-      data.frame(x = dens$x, y = dens$y, method = method, source = "Posterior predictive", rep = i)
-    })),
-    {
-      dens <- density(observed)
-      data.frame(x = dens$x, y = dens$y, method = method, source = "Observed data", rep = 0)
-    }
-  )
-}
-
-ppc_coverage_df <- function(draw_matrix, observed, method, levels = seq(0.1, 0.95, by = 0.05)) {
-  bind_rows(lapply(levels, function(level) {
-    alpha <- (1 - level) / 2
-    lower <- apply(draw_matrix, 2, quantile, probs = alpha)
-    upper <- apply(draw_matrix, 2, quantile, probs = 1 - alpha)
-
-    data.frame(method = method, nominal = level, actual = mean(observed >= lower & observed <= upper))
-  }))
-}
-
-main_mu_draws <- function(draws, male, bw_z, age_z) {
-  draws[, "alpha"] +
-    draws[, "beta_male"] * male +
-    draws[, "beta_bw"] * bw_z +
-    draws[, "beta_bw2"] * bw_z^2 +
-    draws[, "beta_age"] * age_z +
-    draws[, "beta_age2"] * age_z^2
-}
-
-main_hmc <- readRDS(file.path(artifacts_dir, "main_hmc_fit.rds"))
-main_mf <- readRDS(file.path(artifacts_dir, "main_vi_meanfield_fit.rds"))
-main_fr <- readRDS(file.path(artifacts_dir, "main_vi_fullrank_fit.rds"))
+fits <- list(
+  "HMC" = readRDS(file.path(artifacts_dir, "main_hmc_fit.rds")),
+  "Mean-field VI" = readRDS(file.path(artifacts_dir, "main_vi_meanfield_fit.rds")),
+  "Full-rank VI" = readRDS(file.path(artifacts_dir, "main_vi_fullrank_fit.rds"))
+)
 model_df <- readRDS(file.path(tables_dir, "model_data.rds"))
 prediction_summary <- read.csv(file.path(tables_dir, "main_prediction_summary.csv"), stringsAsFactors = FALSE)
 parameter_summary <- read.csv(file.path(tables_dir, "main_parameter_summary.csv"), stringsAsFactors = FALSE)
 ppc_df <- baseline_ppc_subset(model_df)
 
-trace_df <- as.data.frame(as_draws_df(main_hmc$draws(variables = main_parameter_vars))) |>
+trace_df <- as.data.frame(as_draws_df(fits$HMC$draws(variables = main_parameter_vars))) |>
   select(all_of(main_parameter_vars), .chain, .iteration) |>
   pivot_longer(cols = all_of(main_parameter_vars), names_to = "parameter", values_to = "value")
 
@@ -92,22 +60,20 @@ save_plot(
   5.6
 )
 
-hmc_y_ppc <- as_draws_matrix(main_hmc$draws(variables = "y_ppc"))
-mf_y_ppc <- as_draws_matrix(main_mf$draws(variables = "y_ppc"))
-fr_y_ppc <- as_draws_matrix(main_fr$draws(variables = "y_ppc"))
+ppc_draws <- lapply(fits, function(fit) {
+  as_draws_matrix(fit$draws(variables = "y_ppc"))
+})
 
 set.seed(405)
 save_plot(
   ggplot(
-    bind_rows(
-      ppc_density_df(hmc_y_ppc, ppc_df$TotalKg, "HMC"),
-      ppc_density_df(mf_y_ppc, ppc_df$TotalKg, "Mean-field VI"),
-      ppc_density_df(fr_y_ppc, ppc_df$TotalKg, "Full-rank VI")
-    )
+    bind_rows(lapply(names(ppc_draws), function(method) {
+      ppc_density_df(ppc_draws[[method]], ppc_df$TotalKg, method)
+    }))
   ) +
     geom_line(
       data = function(x) subset(x, source == "Posterior predictive"),
-      aes(x, y, group = interaction(method, rep)),
+      aes(x, y, group = interaction(label, rep)),
       color = "#94a3b8",
       alpha = 0.35,
       linewidth = 0.4
@@ -118,7 +84,7 @@ save_plot(
       color = "#111827",
       linewidth = 1
     ) +
-    facet_wrap(~ method, ncol = 1) +
+    facet_wrap(~ label, ncol = 1) +
     labs(
       title = "Main Posterior Predictive Check",
       subtitle = "Observed subset density against posterior predictive replicated densities",
@@ -131,14 +97,12 @@ save_plot(
   8.5
 )
 
-coverage_df <- bind_rows(
-  ppc_coverage_df(hmc_y_ppc, ppc_df$TotalKg, "HMC"),
-  ppc_coverage_df(mf_y_ppc, ppc_df$TotalKg, "Mean-field VI"),
-  ppc_coverage_df(fr_y_ppc, ppc_df$TotalKg, "Full-rank VI")
-)
+coverage_df <- bind_rows(lapply(names(ppc_draws), function(method) {
+  ppc_coverage_df(ppc_draws[[method]], ppc_df$TotalKg, method)
+}))
 
 save_plot(
-  ggplot(coverage_df, aes(nominal, actual, color = method)) +
+  ggplot(coverage_df, aes(nominal, actual, color = label)) +
     geom_abline(slope = 1, intercept = 0, color = "#9ca3af", linetype = "dashed") +
     geom_line(linewidth = 0.9) +
     geom_point(size = 1.8) +
@@ -180,7 +144,7 @@ save_plot(
   7
 )
 
-main_draws <- as_draws_matrix(main_hmc$draws(variables = c("alpha", "beta_male", "beta_bw", "beta_bw2", "beta_age", "beta_age2")))
+main_draws <- as_draws_matrix(fits$HMC$draws(variables = c("alpha", "beta_male", "beta_bw", "beta_bw2", "beta_age", "beta_age2")))
 bw_center <- mean(model_df$BodyweightKg)
 bw_scale <- sd(model_df$BodyweightKg)
 age_center <- mean(model_df$Age)

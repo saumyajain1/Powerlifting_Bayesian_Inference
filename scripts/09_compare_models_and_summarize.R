@@ -11,62 +11,6 @@ figures_dir <- "figures/model_comparison"
 ensure_dir(tables_dir)
 ensure_dir(figures_dir)
 
-ppc_density_df <- function(draw_matrix, observed, model, n_reps = 25) {
-  keep <- sample(seq_len(nrow(draw_matrix)), n_reps)
-
-  rbind(
-    bind_rows(lapply(seq_along(keep), function(i) {
-      dens <- density(draw_matrix[keep[i], ])
-      data.frame(x = dens$x, y = dens$y, model = model, source = "Posterior predictive", rep = i)
-    })),
-    {
-      dens <- density(observed)
-      data.frame(x = dens$x, y = dens$y, model = model, source = "Observed data", rep = 0)
-    }
-  )
-}
-
-ppc_coverage_df <- function(draw_matrix, observed, model, levels = seq(0.1, 0.95, by = 0.05)) {
-  bind_rows(lapply(levels, function(level) {
-    alpha <- (1 - level) / 2
-    lower <- apply(draw_matrix, 2, quantile, probs = alpha)
-    upper <- apply(draw_matrix, 2, quantile, probs = 1 - alpha)
-
-    data.frame(model = model, nominal = level, actual = mean(observed >= lower & observed <= upper))
-  }))
-}
-
-ppc_metrics <- function(draw_matrix, observed, model, method) {
-  lower <- apply(draw_matrix, 2, quantile, probs = 0.05)
-  upper <- apply(draw_matrix, 2, quantile, probs = 0.95)
-  median_pred <- apply(draw_matrix, 2, median)
-
-  data.frame(
-    model = model,
-    method = method,
-    mae = mean(abs(observed - median_pred)),
-    coverage90 = mean(observed >= lower & observed <= upper),
-    mean_interval90 = mean(upper - lower),
-    row.names = NULL
-  )
-}
-
-baseline_mu_draws <- function(draws, male, bw_z, age_z) {
-  draws[, "alpha"] +
-    draws[, "beta_male"] * male +
-    draws[, "beta_bw"] * bw_z +
-    draws[, "beta_age"] * age_z
-}
-
-main_mu_draws <- function(draws, male, bw_z, age_z) {
-  draws[, "alpha"] +
-    draws[, "beta_male"] * male +
-    draws[, "beta_bw"] * bw_z +
-    draws[, "beta_bw2"] * bw_z^2 +
-    draws[, "beta_age"] * age_z +
-    draws[, "beta_age2"] * age_z^2
-}
-
 model_df <- readRDS(file.path(tables_dir, "model_data.rds"))
 prediction_grid <- readRDS(file.path(tables_dir, "prediction_grid.rds"))
 ppc_df <- baseline_ppc_subset(model_df)
@@ -74,28 +18,30 @@ ppc_df <- baseline_ppc_subset(model_df)
 baseline_prediction <- read.csv(file.path(tables_dir, "baseline_prediction_summary.csv"), stringsAsFactors = FALSE)
 main_prediction <- read.csv(file.path(tables_dir, "main_prediction_summary.csv"), stringsAsFactors = FALSE)
 
-baseline_hmc <- readRDS("artifacts/baseline/baseline_hmc_fit.rds")
-baseline_mf <- readRDS("artifacts/baseline/baseline_vi_meanfield_fit.rds")
-baseline_fr <- readRDS("artifacts/baseline/baseline_vi_fullrank_fit.rds")
-main_hmc <- readRDS("artifacts/main/main_hmc_fit.rds")
-main_mf <- readRDS("artifacts/main/main_vi_meanfield_fit.rds")
-main_fr <- readRDS("artifacts/main/main_vi_fullrank_fit.rds")
-
-baseline_hmc_y_ppc <- as_draws_matrix(baseline_hmc$draws(variables = "y_ppc"))
-baseline_mf_y_ppc <- as_draws_matrix(baseline_mf$draws(variables = "y_ppc"))
-baseline_fr_y_ppc <- as_draws_matrix(baseline_fr$draws(variables = "y_ppc"))
-main_hmc_y_ppc <- as_draws_matrix(main_hmc$draws(variables = "y_ppc"))
-main_mf_y_ppc <- as_draws_matrix(main_mf$draws(variables = "y_ppc"))
-main_fr_y_ppc <- as_draws_matrix(main_fr$draws(variables = "y_ppc"))
-
-model_comparison_summary <- bind_rows(
-  ppc_metrics(baseline_hmc_y_ppc, ppc_df$TotalKg, "Baseline", "HMC"),
-  ppc_metrics(baseline_mf_y_ppc, ppc_df$TotalKg, "Baseline", "Mean-field VI"),
-  ppc_metrics(baseline_fr_y_ppc, ppc_df$TotalKg, "Baseline", "Full-rank VI"),
-  ppc_metrics(main_hmc_y_ppc, ppc_df$TotalKg, "Main", "HMC"),
-  ppc_metrics(main_mf_y_ppc, ppc_df$TotalKg, "Main", "Mean-field VI"),
-  ppc_metrics(main_fr_y_ppc, ppc_df$TotalKg, "Main", "Full-rank VI")
+fit_sets <- list(
+  "Baseline" = list(
+    "HMC" = readRDS("artifacts/baseline/baseline_hmc_fit.rds"),
+    "Mean-field VI" = readRDS("artifacts/baseline/baseline_vi_meanfield_fit.rds"),
+    "Full-rank VI" = readRDS("artifacts/baseline/baseline_vi_fullrank_fit.rds")
+  ),
+  "Main" = list(
+    "HMC" = readRDS("artifacts/main/main_hmc_fit.rds"),
+    "Mean-field VI" = readRDS("artifacts/main/main_vi_meanfield_fit.rds"),
+    "Full-rank VI" = readRDS("artifacts/main/main_vi_fullrank_fit.rds")
+  )
 )
+
+ppc_draws <- lapply(fit_sets, function(fits) {
+  lapply(fits, function(fit) {
+    as_draws_matrix(fit$draws(variables = "y_ppc"))
+  })
+})
+
+model_comparison_summary <- bind_rows(lapply(names(ppc_draws), function(model) {
+  bind_rows(lapply(names(ppc_draws[[model]]), function(method) {
+    ppc_metrics(ppc_draws[[model]][[method]], ppc_df$TotalKg, model, method)
+  }))
+}))
 
 write.csv(model_comparison_summary, file.path(tables_dir, "model_comparison_summary.csv"), row.names = FALSE)
 
@@ -128,14 +74,13 @@ save_plot(
 set.seed(405)
 save_plot(
   ggplot(
-    bind_rows(
-      ppc_density_df(baseline_hmc_y_ppc, ppc_df$TotalKg, "Baseline"),
-      ppc_density_df(main_hmc_y_ppc, ppc_df$TotalKg, "Main")
-    )
+    bind_rows(lapply(c("Baseline", "Main"), function(model) {
+      ppc_density_df(ppc_draws[[model]]$HMC, ppc_df$TotalKg, model)
+    }))
   ) +
     geom_line(
       data = function(x) subset(x, source == "Posterior predictive"),
-      aes(x, y, group = interaction(model, rep)),
+      aes(x, y, group = interaction(label, rep)),
       color = "#94a3b8",
       alpha = 0.35,
       linewidth = 0.4
@@ -146,7 +91,7 @@ save_plot(
       color = "#111827",
       linewidth = 1
     ) +
-    facet_wrap(~ model, ncol = 1) +
+    facet_wrap(~ label, ncol = 1) +
     labs(
       title = "Baseline vs Main HMC Posterior Predictive Check",
       subtitle = "Observed subset density against posterior predictive replicated densities",
@@ -161,11 +106,10 @@ save_plot(
 
 save_plot(
   ggplot(
-    bind_rows(
-      ppc_coverage_df(baseline_hmc_y_ppc, ppc_df$TotalKg, "Baseline"),
-      ppc_coverage_df(main_hmc_y_ppc, ppc_df$TotalKg, "Main")
-    ),
-    aes(nominal, actual, color = model)
+    bind_rows(lapply(c("Baseline", "Main"), function(model) {
+      ppc_coverage_df(ppc_draws[[model]]$HMC, ppc_df$TotalKg, model)
+    })),
+    aes(nominal, actual, color = label)
   ) +
     geom_abline(slope = 1, intercept = 0, color = "#9ca3af", linetype = "dashed") +
     geom_line(linewidth = 0.9) +
@@ -210,8 +154,8 @@ save_plot(
   6
 )
 
-baseline_mu_pred <- as_draws_matrix(baseline_hmc$draws(variables = "mu_pred"))
-main_mu_pred <- as_draws_matrix(main_hmc$draws(variables = "mu_pred"))
+baseline_mu_pred <- as_draws_matrix(fit_sets$Baseline$HMC$draws(variables = "mu_pred"))
+main_mu_pred <- as_draws_matrix(fit_sets$Main$HMC$draws(variables = "mu_pred"))
 n_draws <- min(nrow(baseline_mu_pred), nrow(main_mu_pred))
 mu_diff <- main_mu_pred[seq_len(n_draws), , drop = FALSE] - baseline_mu_pred[seq_len(n_draws), , drop = FALSE]
 
@@ -253,8 +197,8 @@ fixed_delta_grid <- data.frame(
   )
 )
 
-baseline_draws <- as_draws_matrix(baseline_hmc$draws(variables = c("alpha", "beta_male", "beta_bw", "beta_age")))
-main_draws <- as_draws_matrix(main_hmc$draws(variables = c("alpha", "beta_male", "beta_bw", "beta_bw2", "beta_age", "beta_age2")))
+baseline_draws <- as_draws_matrix(fit_sets$Baseline$HMC$draws(variables = c("alpha", "beta_male", "beta_bw", "beta_age")))
+main_draws <- as_draws_matrix(fit_sets$Main$HMC$draws(variables = c("alpha", "beta_male", "beta_bw", "beta_bw2", "beta_age", "beta_age2")))
 
 fixed_delta_compare <- bind_rows(lapply(seq_len(nrow(fixed_delta_grid)), function(i) {
   bw1 <- fixed_delta_grid$BodyweightKg[i]

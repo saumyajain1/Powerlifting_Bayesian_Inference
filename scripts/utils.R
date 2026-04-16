@@ -134,6 +134,133 @@ fit_parameter_summary <- function(fit, variables, method) {
   out
 }
 
+draw_summary <- function(draw_df, method) {
+  out <- data.frame(
+    variable = names(draw_df),
+    mean = vapply(draw_df, mean, numeric(1)),
+    median = vapply(draw_df, median, numeric(1)),
+    sd = vapply(draw_df, sd, numeric(1)),
+    q5 = vapply(draw_df, quantile, numeric(1), probs = 0.05),
+    q95 = vapply(draw_df, quantile, numeric(1), probs = 0.95),
+    row.names = NULL
+  )
+
+  out <- align_summary_columns(out)
+  out$method <- method
+  out
+}
+
+ppc_density_df <- function(draw_matrix, observed, label, n_reps = 25) {
+  keep <- sample(seq_len(nrow(draw_matrix)), n_reps)
+
+  rbind(
+    dplyr::bind_rows(lapply(seq_along(keep), function(i) {
+      dens <- density(draw_matrix[keep[i], ])
+      data.frame(x = dens$x, y = dens$y, label = label, source = "Posterior predictive", rep = i)
+    })),
+    {
+      dens <- density(observed)
+      data.frame(x = dens$x, y = dens$y, label = label, source = "Observed data", rep = 0)
+    }
+  )
+}
+
+ppc_coverage_df <- function(draw_matrix, observed, label, levels = seq(0.1, 0.95, by = 0.05)) {
+  dplyr::bind_rows(lapply(levels, function(level) {
+    alpha <- (1 - level) / 2
+    lower <- apply(draw_matrix, 2, quantile, probs = alpha)
+    upper <- apply(draw_matrix, 2, quantile, probs = 1 - alpha)
+
+    data.frame(label = label, nominal = level, actual = mean(observed >= lower & observed <= upper))
+  }))
+}
+
+ppc_metrics <- function(draw_matrix, observed, model, method) {
+  lower <- apply(draw_matrix, 2, quantile, probs = 0.05)
+  upper <- apply(draw_matrix, 2, quantile, probs = 0.95)
+  median_pred <- apply(draw_matrix, 2, median)
+
+  data.frame(
+    model = model,
+    method = method,
+    mae = mean(abs(observed - median_pred)),
+    coverage90 = mean(observed >= lower & observed <= upper),
+    mean_interval90 = mean(upper - lower),
+    row.names = NULL
+  )
+}
+
+baseline_mu_draws <- function(draws, male, bw_z, age_z) {
+  draws[, "alpha"] +
+    draws[, "beta_male"] * male +
+    draws[, "beta_bw"] * bw_z +
+    draws[, "beta_age"] * age_z
+}
+
+main_mu_draws <- function(draws, male, bw_z, age_z) {
+  draws[, "alpha"] +
+    draws[, "beta_male"] * male +
+    draws[, "beta_bw"] * bw_z +
+    draws[, "beta_bw2"] * bw_z^2 +
+    draws[, "beta_age"] * age_z +
+    draws[, "beta_age2"] * age_z^2
+}
+
+load_or_sample_fit <- function(model, data, fit_path, output_dir, output_basename, seed, adapt_delta, iter_warmup = 500, iter_sampling = 500, refresh = 200) {
+  if (file.exists(fit_path)) {
+    return(readRDS(fit_path))
+  }
+
+  fit <- model$sample(
+    data = data,
+    seed = seed,
+    chains = 4,
+    parallel_chains = min(4, parallel::detectCores()),
+    iter_warmup = iter_warmup,
+    iter_sampling = iter_sampling,
+    adapt_delta = adapt_delta,
+    refresh = refresh,
+    output_dir = output_dir,
+    output_basename = output_basename
+  )
+  saveRDS(fit, fit_path)
+  fit
+}
+
+load_or_vi_fit <- function(model, data, fit_path, output_dir, output_basename, seed, algorithm, iter = 10000, output_samples = 1000, refresh = 200) {
+  if (file.exists(fit_path)) {
+    return(readRDS(fit_path))
+  }
+
+  fit <- model$variational(
+    data = data,
+    seed = seed,
+    algorithm = algorithm,
+    iter = iter,
+    output_samples = output_samples,
+    refresh = refresh,
+    output_dir = output_dir,
+    output_basename = output_basename
+  )
+  saveRDS(fit, fit_path)
+  fit
+}
+
+fit_list_parameter_summary <- function(fits, variables) {
+  dplyr::bind_rows(lapply(names(fits), function(method) {
+    fit_parameter_summary(fits[[method]], variables, method)
+  }))
+}
+
+fit_list_generated_summary <- function(fits, variable, prefix, meta) {
+  dplyr::bind_rows(lapply(names(fits), function(method) {
+    transform(
+      summarize_generated(posterior::as_draws_matrix(fits[[method]]$draws(variables = variable)), prefix, meta),
+      method = method
+    )
+  }))
+}
+
 main_prior_data <- function() {
   list(
     alpha_mean = 483.2,
