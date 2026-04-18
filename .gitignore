@@ -7,6 +7,18 @@
 # Local planning notes
 plan.txt
 discussion.txt
+report_plan.txt
+
+# Keep only rendered final report artifacts in git.
+reports/final/*.Rmd
+reports/final/*.md
+reports/final/*.tex
+reports/final/*.aux
+reports/final/*.log
+reports/final/*.out
+reports/final/*.toc
+reports/final/*.synctex.gz
+scripts/11_compile_report.R
 
 # Large raw datasets stay local by default.
 datasets/raw/*
