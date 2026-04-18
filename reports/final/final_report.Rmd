@@ -1,0 +1,324 @@
+---
+title: "Bayesian Modeling of Bodyweight and Strength in Raw Powerlifting"
+author: "Saumya Jain"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    fig_caption: true
+    number_sections: true
+fontsize: 10pt
+geometry: top=0.4in,bottom=0.55in,left=0.55in,right=0.55in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \usepackage{hyperref}
+  - \hypersetup{colorlinks=true, allcolors=black}
+  - \let\oldhref\href
+  - \renewcommand{\href}[2]{\oldhref{#1}{\underline{#2}}}
+  - \setlength{\parskip}{0.35em}
+  - \setlength{\parindent}{0pt}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "100%"
+)
+
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+
+library(dplyr)
+library(knitr)
+
+repo_url <- "https://github.com/saumyajain1/Powerlifting_Bayesian_Inference"
+opl_url <- "https://openpowerlifting.gitlab.io/opl-csv/"
+paper_solberg_url <- "https://doi.org/10.1123/ijspp.2019-0093"
+paper_vandenhoek_url <- "https://link.springer.com/article/10.1186/s13102-022-00505-2"
+paper_peyen_url <- "https://arxiv.org/abs/2503.13040"
+paper_latella_url <- "https://doi.org/10.1007/s40279-023-01962-6"
+project_root <- Sys.getenv("PROJECT_ROOT")
+pfile <- function(path) file.path(project_root, path)
+
+frozen_df <- readRDS(pfile("datasets/processed/openpowerlifting_2025_sbd.rds"))
+model_df <- readRDS(pfile("datasets/intermediate/model_data.rds"))
+comparison_df <- read.csv(pfile("datasets/intermediate/model_comparison_summary.csv"), stringsAsFactors = FALSE)
+
+baseline_hmc <- subset(comparison_df, model == "Baseline" & method == "HMC")
+main_hmc <- subset(comparison_df, model == "Main" & method == "HMC")
+
+head_tbl <- frozen_df |>
+  select(Sex, Age, BodyweightKg, TotalKg, Tested, WeightClassKg) |>
+  head(6)
+
+sex_counts <- model_df |>
+  count(Sex) |>
+  mutate(prop = n / sum(n))
+
+male_n <- sex_counts$n[sex_counts$Sex == "M"]
+female_n <- sex_counts$n[sex_counts$Sex == "F"]
+
+bw_mean <- mean(model_df$BodyweightKg)
+bw_sd <- sd(model_df$BodyweightKg)
+age_mean <- mean(model_df$Age)
+age_sd <- sd(model_df$Age)
+total_mean <- mean(model_df$TotalKg)
+total_sd <- sd(model_df$TotalKg)
+```
+
+# Introduction
+
+Powerlifting performance depends strongly on bodyweight, age, and sex, but the relationship is not obviously linear. Heavier lifters tend to lift more total weight, yet coaches and scoring systems often assume some form of diminishing returns, where additional bodyweight yields smaller marginal increases in strength at the upper end of the bodyweight range. This project studies that relationship in raw powerlifting using a Bayesian workflow built around explicit prior choice, posterior predictive checking, and posterior-computation comparison.
+
+The analysis uses the [OpenPowerlifting](`r opl_url`) database, restricted to the 2025 raw squat-bench-deadlift (SBD) results. The main research questions are: (1) does the relationship between bodyweight and powerlifting total show diminishing returns after adjusting for age and sex, and (2) does a richer nonlinear Bayesian model improve on a simpler linear benchmark? To answer these questions, I fit two Bayesian models: a Gaussian linear baseline and a nonlinear Student-\(t\) model. The baseline can be viewed as a Gaussian generalized linear model with identity link, whereas the richer model extends beyond standard GLMs. Each model is estimated with Hamiltonian Monte Carlo (HMC), mean-field variational inference (VI), and full-rank VI. Because the models are generative for `TotalKg` given the predictors, they also support predictive simulation.
+
+Project repository: [github.com/saumyajain1/Powerlifting_Bayesian_Inference](`r repo_url`)
+
+# Data and Scope
+
+The source dataset is the public [OpenPowerlifting bulk CSV](`r opl_url`). I filtered the data to 2025 competitions, raw equipment, SBD events, complete cases for the main analysis variables, and competitors with a valid total, removing `DQ`, `DD`, and `NS` outcomes. Here, `TotalKg` means the sum of the best squat, bench press, and deadlift in a meet, while `Tested` indicates whether the meet was recorded as drug-tested. The resulting frozen subset contains `r format(nrow(frozen_df), big.mark = ",")` rows and `r ncol(frozen_df)` columns.
+
+For the main models, I restricted the analysis to `Sex \in \{F, M\}`. The category `Mx` appears only 43 times in the frozen subset, which is too small for stable estimation in the current project scope. After this restriction, the final modeling dataset contains `r format(nrow(model_df), big.mark = ",")` rows: `r format(female_n, big.mark = ",")` female competitors and `r format(male_n, big.mark = ",")` male competitors. The variable `Tested` is retained only as exploratory context and is not part of the main models.
+
+Table 1 shows a compact view of the working dataset structure.
+
+```{r head-table}
+kable(
+  head_tbl,
+  booktabs = TRUE,
+  digits = 1,
+  caption = "First six rows of the frozen 2025 raw SBD subset."
+)
+```
+
+# Related Work
+
+Recent studies use powerlifting competition data to study performance trends, scoring systems, and strategy. [Solberg et al. (2019)](`r paper_solberg_url`) estimated athlete-specific quadratic performance curves and found that peak age in powerlifting is substantially older than in Olympic weightlifting. [van den Hoek et al. (2022)](`r paper_vandenhoek_url`) focused instead on competition-day success, showing that bodyweight, age, and attempt selection affect winning outcomes. [Latella et al. (2024)](`r paper_latella_url`) used longitudinal growth modelling to study how strength changes across ages, sexes, and weight classes, emphasizing that adaptation over time is not linear. Most closely related here, [Peyen, Nuermaimaiti, and Cunningham (2025)](`r paper_peyen_url`) revisited the assumption of diminishing returns in bodyweight-based powerlifting scoring using OpenPowerlifting data and argued that the relationship is more complex than a simple monotone flattening curve.
+
+This project differs from that literature in three ways. First, the goal is not to build a scoring rule or explain competition success, but to estimate the bodyweight-total relationship itself. Second, the analysis uses a Bayesian workflow with priors chosen from the data scale and checked by prior predictive simulation. Third, the project compares posterior-computation methods, using HMC as the reference and VI as a faster approximation whose adequacy can be tested empirically.
+
+# Exploratory Analysis and Model Motivation
+
+The exploratory analysis was designed to guide the modeling choices rather than simply describe the dataset. Three conclusions were especially important.
+
+First, `TotalKg` rises strongly with `BodyweightKg`, but the increase appears to flatten at higher bodyweights. Second, the relationship between `TotalKg` and age is visibly nonlinear, with performance peaking in adulthood and declining later. Third, the spread in `TotalKg` becomes larger at higher bodyweights, especially for men, suggesting that a heavier-tailed likelihood may be safer than a purely Gaussian specification; a supporting spread-by-bodyweight plot appears in [Appendix: Additional EDA and Prior Predictive Checks](#additional-eda-and-prior-predictive-checks).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/eda/total_vs_bodyweight.png}
+\includegraphics[width=0.49\linewidth]{../../figures/eda/total_vs_age.png}
+\caption{Exploratory plots used to motivate the model. Left: total strength rises strongly with bodyweight. Right: the age relationship is clearly nonlinear.}
+\end{figure}
+
+On the restricted `F/M` subset, the response scale itself did not require transformation. The raw `TotalKg` distribution was already fairly symmetric relative to a log transform, so I modeled `TotalKg` directly on the kilogram scale. These EDA conclusions led to the following modeling decisions:
+
+- a simple Gaussian linear baseline for benchmarking;
+- a nonlinear main model with quadratic bodyweight and age terms;
+- a Student-\(t\) likelihood in the main model;
+- standardized predictors for bodyweight and age to make prior choice easier.
+
+# Bayesian Models and Prior Choice
+
+The standardized predictors are
+$$
+\text{male}_i = \mathbf{1}\{\text{Sex}_i = M\}, \qquad
+bw_{z,i} = \frac{\text{BodyweightKg}_i - `r round(bw_mean, 2)`}{`r round(bw_sd, 2)`}, \qquad
+age_{z,i} = \frac{\text{Age}_i - `r round(age_mean, 2)`}{`r round(age_sd, 2)`}.
+$$
+
+The baseline model is
+$$
+TotalKg_i \mid \mu_i, \sigma \sim \mathcal{N}(\mu_i, \sigma),
+$$
+with
+$$
+\mu_i = \alpha + \beta_{male}\,\text{male}_i + \beta_{bw}\,bw_{z,i} + \beta_{age}\,age_{z,i}.
+$$
+
+The main model is
+$$
+TotalKg_i \mid \mu_i, \sigma, \nu \sim t_\nu(\mu_i, \sigma),
+$$
+with
+$$
+\mu_i = \alpha + \beta_{male}\,\text{male}_i + \beta_{bw}\,bw_{z,i} + \beta_{bw2}\,bw_{z,i}^2 + \beta_{age}\,age_{z,i} + \beta_{age2}\,age_{z,i}^2.
+$$
+
+The baseline specification is a Gaussian GLM with identity link. For the main model, because the likelihood is Student-\(t\) rather than an exponential-family response model, this richer specification is no longer a standard GLM.
+
+The priors were intentionally weakly informative, but not generic. Their scales were anchored to the observed response scale after predictor standardization. In particular, the intercept prior is centered near the observed mean total, `r round(total_mean, 1)` kg, and the coefficient scales are simple fractions of the observed standard deviation, `r round(total_sd, 1)` kg. The final choices were
+$$
+\alpha \sim \mathcal{N}(483.2, 117.7), \quad
+\beta_{male} \sim \mathcal{N}(0, 94.2), \quad
+\beta_{bw} \sim \mathcal{N}(0, 54.9), \quad
+\beta_{age} \sim \mathcal{N}(0, 31.4),
+$$
+with additional quadratic priors
+$$
+\beta_{bw2}, \beta_{age2} \sim \mathcal{N}(0, 15.7),
+$$
+and scale priors
+$$
+\sigma \sim \text{Exponential}(0.0142), \qquad
+\nu = 4 + \text{Exponential}(0.1667).
+$$
+
+These choices were checked with prior predictive simulation. The selected prior predictive distribution remained broad but plausible on the kilogram scale, producing only a small amount of negative mass and covering the main range of realistic totals. A supporting prior predictive comparison is shown in [Appendix: Additional EDA and Prior Predictive Checks](#additional-eda-and-prior-predictive-checks).
+
+# Posterior Computation and Validation
+
+Both models were fit in Stan. The main method was Hamiltonian Monte Carlo (HMC), a gradient-based Markov chain Monte Carlo algorithm designed to explore continuous posteriors efficiently. Stan implements HMC through the No-U-Turn Sampler (NUTS), an adaptive variant that automatically chooses an appropriate trajectory length instead of requiring that tuning by hand. I treated HMC as the main reference because both of the fitted models are continuous and moderately high-dimensional, so direct grid methods are infeasible and simpler random-walk MCMC would be unnecessarily inefficient.
+
+I also fit mean-field and full-rank variational inference (VI) approximations. VI replaces full posterior sampling with an optimization problem: it finds a simpler distribution that is close to the posterior in Kullback-Leibler divergence. Mean-field VI uses a factorized approximation and is therefore very fast but often too restrictive; full-rank VI allows posterior dependence through a covariance matrix and was included to test whether a richer approximation could recover the HMC results more faithfully.
+
+The baseline model is especially useful because it allows stronger validation than the main model. Although the full posterior is not conjugate in a single closed form, the coefficient posterior is exactly multivariate normal conditional on \(\sigma\), and the marginal posterior of \(\sigma\) is one-dimensional and numerically tractable. This makes it possible to compute a semi-analytic reference posterior for the baseline model and compare it directly with HMC and VI. By contrast, the main model uses a Student-\(t\) likelihood with unknown \(\nu\) and nonlinear mean structure, so no comparable low-dimensional posterior reduction is available. I also ran a synthetic-data recovery check using known parameter values.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/baseline_checks/baseline_exact_vs_hmc_vi.png}
+\includegraphics[width=0.49\linewidth]{../../figures/baseline_checks/baseline_recovery.png}
+\caption{Baseline validation results. Left: HMC closely matches the semi-analytic posterior, while both VI approximations fail. Right: the synthetic-data recovery check captures all true parameter values inside the 90\% posterior intervals.}
+\end{figure}
+
+The validation results are clear. HMC matches the semi-analytic baseline posterior very closely, whereas both VI approximations fail badly, even for the simpler baseline model. This is not a minor loss of efficiency: the baseline HMC predictive median absolute error is about `r round(baseline_hmc$mae, 1)` kg, while the VI approximations exceed 440 kg. Full-rank VI does not meaningfully improve on mean-field VI. This makes HMC the only trustworthy posterior reference for the substantive model comparison.
+
+The main-model HMC fit was usable but rougher than the baseline fit. In particular, the age terms mixed more slowly, one chain had low E-BFMI, and some `Rhat` values remained above ideal thresholds. That does not invalidate the fit, but it does require a cautious interpretation of uncertainty. Even so, the main-model posterior predictive checks still support HMC as the only credible approximation among the three fitted methods: the replicated HMC densities track the observed distribution reasonably well, while both VI approximations are visibly too diffuse. The fuller density and coverage checks are shown in [Appendix: Additional Diagnostics](#additional-diagnostics).
+
+# Results
+
+Figure 3 shows the main HMC bodyweight curves. Predicted totals rise with bodyweight but flatten at the heavier end, and totals at age 60 are lower than at 25 or 40.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\linewidth]{../../figures/main_checks/main_prediction_curves.png}
+\caption{Main-model HMC prediction curves. The relationship between bodyweight and total strength is positive but visibly flatter at higher bodyweights.}
+\end{figure}
+
+This flattening is also supported quantitatively. In the main HMC fit, the quadratic bodyweight term is negative, with posterior mean about `-5.5` and a 90\% interval that remains below zero, while the quadratic age term is also negative, with posterior mean about `-22.2`. Both terms therefore support curved rather than purely linear effects.
+
+The richer model also improves predictive performance, though only modestly. On the common posterior-predictive subset, the baseline HMC model has a median-absolute-error of `r round(baseline_hmc$mae, 1)` kg, while the main HMC model improves this to `r round(main_hmc$mae, 1)` kg. The mean 90% predictive interval width also decreases from `r round(baseline_hmc$mean_interval90, 1)` kg to `r round(main_hmc$mean_interval90, 1)` kg, while 90% interval coverage remains very similar (`r round(baseline_hmc$coverage90, 3)` versus `r round(main_hmc$coverage90, 3)`). The main model is therefore not dramatically better, but it is consistently better on error and interval width without losing calibration. A fuller performance summary across both models and all posterior-computation methods is shown in [Appendix: Additional Diagnostics](#additional-diagnostics).
+
+The baseline-versus-main comparison is most interpretable through the posterior mean curves. Figure 4 shows that the main model predicts somewhat larger totals than the linear baseline at lower and middle bodyweights, but smaller totals at heavier bodyweights. This sign change is exactly the practical signature of diminishing returns in the fitted mean function.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/model_comparison/baseline_vs_main_difference_curves.png}
+\includegraphics[width=0.49\linewidth]{../../figures/model_comparison/baseline_vs_main_fixed_delta_5kg.png}
+\caption{Model-comparison summaries. Left: the nonlinear main model predicts higher totals than baseline at lower and middle bodyweights but lower totals at heavier bodyweights. Right: the baseline implies an almost constant gain from an extra 5 kg of bodyweight, while the main model implies diminishing marginal gains.}
+\end{figure}
+
+The fixed `+5 kg` increment plot on the right side of Figure 4 is especially useful. In the linear baseline model, the predicted gain from an additional 5 kg of bodyweight is almost constant at about 14.8 kg. In the nonlinear main model, that gain is larger at lower bodyweights, crosses the baseline around the middle of the range, and becomes much smaller at heavier bodyweights. The plot is based on posterior draws of \(\mu(bw + 5) - \mu(bw)\), so it summarizes uncertainty in the fitted mean function rather than raw observation-level variability.
+
+Finally, the posterior-method comparison remains decisive in the main model as well. Under HMC, the main model yields plausible flattening curves and the best predictive performance in the project. By contrast, both VI approximations produce much worse predictive performance and dramatically over-diffuse predictive intervals. The substantive conclusions above therefore depend on HMC rather than on VI. Additional model-checking figures, including posterior predictive density and coverage checks, are collected in [Appendix: Additional Diagnostics](#additional-diagnostics).
+
+# Discussion and Limitations
+
+This project provides Bayesian evidence that the relationship between bodyweight and raw powerlifting total is nonlinear and consistent with diminishing returns at higher bodyweights. The richer Student-\(t\) model modestly improves predictive performance over the linear Gaussian baseline and yields a more realistic flattening of the bodyweight-strength curve. The comparison between posterior-computation methods is also substantively important: both mean-field and full-rank VI fail badly, even in the simpler baseline model where HMC can be checked against a semi-analytic reference posterior.
+
+The main limitations are straightforward. First, the main HMC fit is not perfectly clean, especially for the age terms, so posterior uncertainty should be interpreted cautiously. Second, the current main model includes only a sex intercept shift, not sex-by-bodyweight interactions, so it does not estimate different curve shapes for men and women. Third, `Tested` remains exploratory only and cannot support causal claims. Finally, the analysis is restricted to a single year of a public dataset, so the results should be interpreted as a focused case study rather than a universal law of powerlifting performance.
+
+# References
+
+\begingroup
+\small
+\setlength{\parskip}{0.15em}
+
+1. Solberg, P. A., Hopkins, W., Paulsen, G., and Haugen, T. A. (2019). *Peak Age and Performance Progression in World-Class Weightlifting and Powerlifting Athletes*. International Journal of Sports Physiology and Performance, 14(10), 1357-1363. [DOI](`r paper_solberg_url`).
+
+2. van den Hoek, D. J., Owen, P. J., Garrett, J. M., Howells, R. J., Pearson, J., Spathis, J. G., and Latella, C. (2022). *What are the odds? Identifying factors related to competitive success in powerlifting*. BMC Sports Science, Medicine and Rehabilitation, 14, 110. [Article](`r paper_vandenhoek_url`).
+
+3. Peyen, J. C., Nuermaimaiti, R., and Cunningham, J. (2025). *Discussing Diminishing Returns: A New Scoring System for Powerlifting*. arXiv:2503.13040. [Paper](`r paper_peyen_url`).
+
+4. Latella, C., van den Hoek, D., Wolf, M., Androulakis-Korakakis, P., Fisher, J. P., and Steele, J. (2024). *Using Powerlifting Athletes to Determine Strength Adaptations Across Ages in Males and Females: A Longitudinal Growth Modelling Approach*. Sports Medicine, 54, 753-774. [DOI](`r paper_latella_url`).
+
+\endgroup
+
+\newpage
+\appendix
+
+# Additional EDA and Prior Predictive Checks
+
+The main report keeps the exploratory and prior-predictive discussion brief, but the following appendix figures show the supporting diagnostics that motivated the likelihood and prior choices.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/model_design/prior_predictive_candidates.png}
+\includegraphics[width=0.49\linewidth]{../../figures/model_design/prior_mean_curves.png}
+\caption{Prior predictive checks. Left: prior predictive comparison for the candidate models. Right: prior draws from the chosen mean function before seeing the data.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/eda/total_sd_by_bodyweight_bin.png}
+\includegraphics[width=0.49\linewidth]{../../figures/eda/total_sd_by_age_bin.png}
+\caption{EDA figures that motivated the nonlinear and heavy-tailed specification. Left: spread in total strength increases with bodyweight, especially for men. Right: variation across age is also non-constant.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/eda/mean_total_by_weight_class.png}
+\includegraphics[width=0.49\linewidth]{../../figures/eda/mean_total_by_age_class.png}
+\caption{Grouped summaries from the exploratory stage. Weight-class and age-class averages both suggest that a purely linear model would be too rigid.}
+\end{figure}
+
+# Additional Diagnostics
+
+The main report emphasizes the strongest validation and comparison figures. Additional diagnostic plots that support the same conclusions are shown below.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/model_comparison/model_comparison_metrics.png}
+\includegraphics[width=0.49\linewidth]{../../figures/main_checks/main_hmc_vs_vi.png}
+\caption{Additional comparison diagnostics. Left: across both models, HMC delivers the only credible predictive performance; the main HMC fit modestly lowers error and interval width relative to the baseline HMC fit, while both VI approximations are much worse and substantially over-diffuse. Right: in the main model, both VI approximations disagree strongly with HMC on several key parameters, especially the noise and tail parameters, showing that their poor predictive performance reflects posterior-approximation failure rather than a small calibration difference.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/main_checks/main_ppc_density.png}
+\includegraphics[width=0.49\linewidth]{../../figures/main_checks/main_ppc_coverage.png}
+\caption{Main-model posterior predictive checks. Left: the top HMC panel tracks the observed density reasonably well, whereas both VI panels are visibly too flat and diffuse, putting too much mass over implausibly broad ranges of totals. Right: the HMC coverage curve stays much closer to the nominal diagonal, while both VI approximations are badly miscalibrated, so the main substantive conclusions should be read from HMC rather than from VI.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/model_comparison/baseline_vs_main_ppc_density.png}
+\includegraphics[width=0.49\linewidth]{../../figures/model_comparison/baseline_vs_main_ppc_coverage.png}
+\caption{Baseline-versus-main HMC predictive checks. Left: both HMC models reproduce the overall shape of the observed distribution, but the main model is slightly sharper and closer to the central mass of the data. Right: both coverage curves stay close to the nominal diagonal, so the main model’s advantage comes mainly from modestly lower prediction error and narrower intervals rather than from a dramatic calibration gain.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.49\linewidth]{../../figures/model_comparison/baseline_vs_main_hmc_curves.png}
+\includegraphics[width=0.49\linewidth]{../../figures/main_checks/weight_class_deltas.png}
+\caption{Additional substantive summaries. Left: on the original prediction scale, the main HMC curves lie above the baseline at lower and middle bodyweights but below it at heavier bodyweights, which is the direct visual signature of diminishing returns. Right: adjacent weight-class gains remain positive, but the uneven class spacing reflects the real competition ladder and the nearly identical age panels occur because age enters additively in the current model and therefore cancels in within-age bodyweight differences.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\linewidth]{../../figures/main_checks/main_traceplot.png}
+\caption{Main-model HMC traceplot. The chains mix adequately overall but more slowly than in the baseline model, especially for the age terms, where one chain shows a longer transient before joining the others. This is consistent with the low E-BFMI warning and elevated \texttt{Rhat} values discussed in the text, which is why uncertainty in the main model is interpreted more cautiously than in the baseline fit.}
+\end{figure}
+
+# Stan Code
+
+## Baseline model
+
+```{r appendix-baseline-stan, results='asis'}
+cat("```stan\n")
+cat(paste(readLines(pfile("models/baseline_linear.stan")), collapse = "\n"))
+cat("\n```\n")
+```
+
+## Main model
+
+```{r appendix-main-stan, results='asis'}
+cat("```stan\n")
+cat(paste(readLines(pfile("models/main_nonlinear_student_t.stan")), collapse = "\n"))
+cat("\n```\n")
+```
+
+# AI Use
+
+AI tools were used in a limited supporting role for project organization, selective code drafting and refactoring, debugging assistance, and editorial revision of the report. All substantive statistical work, including model formulation, diagnostic assessment, interpretation of results, and final conclusions, was carried out by the author and checked against the executed code, saved outputs, and course materials. Any AI-generated suggestions were treated only as preliminary assistance and were revised or discarded when they did not align with the analysis or project requirements.
