@@ -122,7 +122,8 @@ save_plot(
   ggplot(
     bind_rows(lapply(names(ppc_draws), function(method) {
       ppc_density_df(ppc_draws[[method]], ppc_df$TotalKg, method)
-    }))
+    })) |>
+      mutate(label = factor(label, levels = c("HMC", "Mean-field VI", "Full-rank VI")))
   ) +
     geom_line(
       data = function(x) subset(x, source == "Posterior predictive"),
@@ -152,7 +153,8 @@ save_plot(
 
 coverage_df <- bind_rows(lapply(names(ppc_draws), function(method) {
   ppc_coverage_df(ppc_draws[[method]], ppc_df$TotalKg, method)
-}))
+})) |>
+  mutate(label = factor(label, levels = c("HMC", "Mean-field VI", "Full-rank VI")))
 
 save_plot(
   ggplot(coverage_df, aes(nominal, actual, color = label)) +
